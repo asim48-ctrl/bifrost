@@ -89,7 +89,7 @@ type PrometheusPlugin struct {
 	RequestRetries                 *prometheus.HistogramVec
 	KeyRotationEventsTotal         *prometheus.CounterVec
 	ActiveRequests                 *prometheus.GaugeVec
-	ProviderKeyUp                  *prometheus.GaugeVec
+	ProviderKeyHealthy             *prometheus.GaugeVec
 	customLabels                   []string
 
 	defaultHTTPLabels    []string
@@ -128,6 +128,7 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 	}
 
 	// GoCollector and ProcessCollector go into a separate registry so they are served
+
 	// on /metrics but never pushed to the push gateway (the gateway itself registers
 	// the same metric names and conflicts/spams warnings when they collide).
 	systemRegistry := prometheus.NewRegistry()
@@ -135,6 +136,7 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 	if err := systemRegistry.Register(goCollector); err != nil {
 		return nil, fmt.Errorf("failed to register Go collector: %v", err)
 	}
+
 	processCollector := collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})
 	if err := systemRegistry.Register(processCollector); err != nil {
 		return nil, fmt.Errorf("failed to register process collector: %v", err)
@@ -153,6 +155,7 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 		"routing_rule_name",
 		"selected_key_id",
 		"selected_key_name",
+		"number_of_retries",
 		"fallback_index",
 		"team_id",
 		"team_name",
@@ -308,10 +311,11 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 	// bifrostKeyRotationEventsTotal counts individual retry/rotation events from the attempt trail.
 	// One observation is emitted per failed attempt (where fail_reason is non-nil), not per request.
 	// Use this to track rate-limit pressure and network-error frequency per provider/key.
+
 	bifrostKeyRotationEventsTotal := factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "bifrost_key_rotation_events_total",
-			Help: "Number of key retry/rotation events, broken down by provider, key, and failure reason. One increment per failed attempt.",
+			Help: "Number of key rotations, broken down by provider, key, and failure reason. One increment per rate-limit failure that triggered a switch to a different key on the next retry.",
 		},
 		[]string{"provider", "requested_model", "key_id", "key_name", "fail_reason"},
 	)
@@ -324,9 +328,9 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 		[]string{"method"},
 	)
 
-	bifrostProviderKeyUp := factory.NewGaugeVec(
+	bifrostProviderKeyHealthy := factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "bifrost_provider_key_up",
+			Name: "bifrost_provider_key_healthy",
 			Help: "Health of a provider key. 1 = last attempt succeeded, 0 = last attempt failed.",
 		},
 		[]string{"provider", "key_id", "key_name"},
@@ -356,7 +360,7 @@ func Init(config *Config, pricingManager *modelcatalog.ModelCatalog, logger sche
 		RequestRetries:                 bifrostRequestRetries,
 		KeyRotationEventsTotal:         bifrostKeyRotationEventsTotal,
 		ActiveRequests:                 bifrostActiveRequests,
-		ProviderKeyUp:                  bifrostProviderKeyUp,
+		ProviderKeyHealthy:             bifrostProviderKeyHealthy,
 		customLabels:                   filteredCustomLabels,
 		defaultHTTPLabels:              defaultHTTPLabels,
 		defaultBifrostLabels:           defaultBifrostLabels,
@@ -470,6 +474,7 @@ func (p *PrometheusPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		"routing_rule_name":   routingRuleName,
 		"selected_key_id":     selectedKeyID,
 		"selected_key_name":   selectedKeyName,
+		"number_of_retries":   strconv.Itoa(numberOfRetries),
 		"fallback_index":      strconv.Itoa(fallbackIndex),
 		"team_id":             teamID,
 		"team_name":           teamName,
@@ -548,19 +553,22 @@ func (p *PrometheusPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 			cost = p.pricingManager.CalculateCost(result, pricingScopes)
 		}
 
-		// Emit one counter increment per failed attempt in the trail (fail_reason != nil).
-		// This decouples per-attempt retry visibility from the per-request metrics above.
+		// Emit one rotation counter increment per attempt that actually caused a key swap on the
+		// next try (rate-limit failure with retries remaining). Mark the key unhealthy on any
+		// failure, since key health is per-failure not per-rotation.
 		for _, record := range attemptTrail {
-			if record.FailReason != nil {
+			if record.TriggeredRotation && record.FailReason != nil {
 				p.KeyRotationEventsTotal.WithLabelValues(
 					string(provider), originalModel, record.KeyID, record.KeyName, *record.FailReason,
 				).Inc()
-				p.ProviderKeyUp.WithLabelValues(string(provider), record.KeyID, record.KeyName).Set(0)
+			}
+			if record.FailReason != nil {
+				p.ProviderKeyHealthy.WithLabelValues(string(provider), record.KeyID, record.KeyName).Set(0)
 			}
 		}
 		// Mark the selected key healthy if the request ultimately succeeded
 		if bifrostErr == nil && selectedKeyID != "" {
-			p.ProviderKeyUp.WithLabelValues(string(provider), selectedKeyID, selectedKeyName).Set(1)
+			p.ProviderKeyHealthy.WithLabelValues(string(provider), selectedKeyID, selectedKeyName).Set(1)
 		}
 
 		p.UpstreamRequestsTotal.WithLabelValues(promLabelValues...).Inc()

@@ -5586,6 +5586,17 @@ func executeRequestWithRetries[T any](
 			usedKeyIDs[currentKey.ID] = true
 		}
 		lastWasRateLimit = isRateLimit
+
+		// Flag the just-failed attempt as having triggered a rotation iff the next iteration
+		// will actually select a different key. This is true only for rate-limit failures with
+		// retries remaining; network-error retries reuse the same key, and terminal attempts
+		// (attempts == MaxRetries) won't run another iteration.
+		if isRateLimit && keyProvider != nil && attempts < config.NetworkConfig.MaxRetries {
+			if trail, ok := ctx.Value(schemas.BifrostContextKeyAttemptTrail).([]schemas.KeyAttemptRecord); ok && len(trail) > 0 {
+				trail[len(trail)-1].TriggeredRotation = true
+				ctx.SetValue(schemas.BifrostContextKeyAttemptTrail, trail)
+			}
+		}
 	}
 
 	// Add retry information to error
