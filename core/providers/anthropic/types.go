@@ -183,6 +183,7 @@ var ProviderFeatures = map[schemas.ModelProvider]ProviderFeatureSupport{
 	// WebSearch, CodeExecution, FastMode, TaskBudgets, AdvisorTool,
 	// InferenceGeo, RedactThinking, AdvancedToolUse (full), PromptCachingScope.
 	schemas.Bedrock: {
+		WebSearch:   true,
 		ComputerUse: true, Bash: true, Memory: true, TextEditor: true, ToolSearch: true,
 		ContainerBasic: true,
 		// StructuredOutputs: kept true to match pre-existing behavior and the
@@ -1200,18 +1201,18 @@ const (
 type AnthropicToolName string
 
 const (
-	AnthropicToolNameComputer        AnthropicToolName = "computer"
-	AnthropicToolNameWebSearch       AnthropicToolName = "web_search"
-	AnthropicToolNameWebFetch        AnthropicToolName = "web_fetch"
-	AnthropicToolNameBash            AnthropicToolName = "bash"
-	AnthropicToolNameTextEditor      AnthropicToolName = "str_replace_based_edit_tool"
+	AnthropicToolNameComputer   AnthropicToolName = "computer"
+	AnthropicToolNameWebSearch  AnthropicToolName = "web_search"
+	AnthropicToolNameWebFetch   AnthropicToolName = "web_fetch"
+	AnthropicToolNameBash       AnthropicToolName = "bash"
+	AnthropicToolNameTextEditor AnthropicToolName = "str_replace_based_edit_tool"
 	// AnthropicToolNameTextEditorLegacy is the name required for text_editor_20250124
 	// and text_editor_20250429. Newer text_editor_20250728+ use AnthropicToolNameTextEditor.
 	AnthropicToolNameTextEditorLegacy AnthropicToolName = "str_replace_editor"
-	AnthropicToolNameCodeExecution   AnthropicToolName = "code_execution"
-	AnthropicToolNameMemory          AnthropicToolName = "memory"
-	AnthropicToolNameToolSearchBM25  AnthropicToolName = "tool_search_tool_bm25"
-	AnthropicToolNameToolSearchRegex AnthropicToolName = "tool_search_tool_regex"
+	AnthropicToolNameCodeExecution    AnthropicToolName = "code_execution"
+	AnthropicToolNameMemory           AnthropicToolName = "memory"
+	AnthropicToolNameToolSearchBM25   AnthropicToolName = "tool_search_tool_bm25"
+	AnthropicToolNameToolSearchRegex  AnthropicToolName = "tool_search_tool_regex"
 )
 
 type AnthropicToolComputerUse struct {

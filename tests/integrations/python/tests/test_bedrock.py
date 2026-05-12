@@ -46,6 +46,12 @@ Count Tokens Tests:
 27. Count tokens from long text - Cross-provider
 28. Count tokens from multi-turn conversation - Cross-provider
 
+Nova System Tools Tests (TestNovaSystemTools):
+50. nova_grounding non-streaming (converse)
+51. nova_grounding streaming (converse-stream)
+52. nova_code_interpreter non-streaming (converse)
+53. nova_code_interpreter streaming (converse-stream)
+
 Invoke Endpoint — Image Generation Tests (TestBedrockInvokeEndpoint):
 29. Titan image generation via invoke (taskType=TEXT_IMAGE)
 30. Titan embeddings via invoke (inputText)
@@ -2893,3 +2899,348 @@ class TestBedrockInvokeEndpoint:
         full_text = "".join(text_parts)
         assert full_text, f"Expected non-empty streamed text, got: {full_text!r}"
         print(f"  ✓ event_types={event_types}, text={full_text[:60]!r}")
+
+
+# ---------------------------------------------------------------------------
+# Nova System Tools Tests (nova_grounding and nova_code_interpreter)
+# ---------------------------------------------------------------------------
+# These tests exercise Bedrock Nova system tools through the Bifrost converse
+# and converse-stream paths. Nova system tools are AWS-managed: the model
+# invokes them automatically (no client-side tool execution required).
+#
+# nova_grounding  → maps to web_search in Bifrost neutral schema
+# nova_code_interpreter → maps to code_interpreter in Bifrost neutral schema
+# ---------------------------------------------------------------------------
+
+
+class TestNovaSystemTools:
+    """
+    Tests for Amazon Nova system tools via Bedrock Converse and Converse-Stream.
+
+    Both tools are server-managed by AWS — the model calls them and AWS executes
+    them automatically in the same response. No client-side tool loop is needed.
+
+    50. nova_grounding non-streaming
+    51. nova_grounding streaming
+    52. nova_code_interpreter non-streaming
+    53. nova_code_interpreter streaming
+    """
+
+    NOVA_MODEL = "us.amazon.nova-2-lite-v1:0"
+
+    # ------------------------------------------------------------------ #
+    # 50. nova_grounding — non-streaming                                   #
+    # ------------------------------------------------------------------ #
+    @skip_if_no_api_key("bedrock")
+    def test_50_nova_grounding_non_streaming(self, bedrock_client):
+        """Test Case 50: nova_grounding system tool via Bedrock Converse (non-streaming).
+
+        Sends a converse request with systemTool nova_grounding enabled. The model
+        automatically searches the web and returns a grounded text response. Bifrost
+        maps nova_grounding → web_search in the neutral schema and converts back.
+        """
+        print("\n=== Test 50: nova_grounding via converse (non-streaming) ===")
+
+        tool_config = {
+            "tools": [
+                {"systemTool": {"name": "nova_grounding"}}
+            ]
+        }
+
+        try:
+            response = bedrock_client.converse(
+                modelId=self.NOVA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Use web search to find a brief description of the Eiffel Tower "
+                                    "and tell me when it was built."
+                                )
+                            }
+                        ],
+                    }
+                ],
+                toolConfig=tool_config,
+                inferenceConfig={"maxTokens": 500},
+            )
+        except Exception as e:
+            err_str = str(e).lower()
+            if "validation" in err_str or "unknown" in err_str or "not supported" in err_str:
+                pytest.skip(f"nova_grounding not available or schema rejected: {e}")
+            raise
+
+        assert "output" in response, f"Expected 'output' in response, got: {list(response.keys())}"
+        msg = response["output"].get("message", {})
+        assert msg.get("role") == "assistant", f"Expected role='assistant', got: {msg.get('role')}"
+
+        content_blocks = msg.get("content", [])
+        assert isinstance(content_blocks, list) and len(content_blocks) > 0, (
+            f"Expected non-empty content blocks, got: {content_blocks}"
+        )
+
+        # nova_grounding returns multiple content blocks: empty text, toolUse,
+        # toolResult, then the actual grounded text (possibly split across blocks).
+        # Collect all non-empty text across every block.
+        full_text = " ".join(b["text"] for b in content_blocks if b.get("text", "").strip())
+        assert full_text, (
+            f"Expected non-empty text in grounding response, got: {content_blocks}"
+        )
+
+        # nova_grounding should produce text about the Eiffel Tower
+        assert any(kw in full_text.lower() for kw in ["eiffel", "paris", "tower", "france", "1889"]), (
+            f"Expected Eiffel Tower info in response, got: {full_text[:200]}"
+        )
+
+        stop_reason = response.get("stopReason", "")
+        print(stop_reason)
+        assert stop_reason in ("end_turn", "max_tokens"), (
+            f"Unexpected stopReason: {stop_reason}"
+        )
+        print(f"  ✓ stopReason={stop_reason!r}, text={full_text[:80]!r}")
+
+    # ------------------------------------------------------------------ #
+    # 51. nova_grounding — streaming                                       #
+    # ------------------------------------------------------------------ #
+    @skip_if_no_api_key("bedrock")
+    def test_51_nova_grounding_streaming(self, bedrock_client):
+        """Test Case 51: nova_grounding system tool via Bedrock Converse-Stream.
+
+        Verifies that text deltas arrive through the streaming path when nova_grounding
+        is enabled. Citations may appear as contentBlockDelta citation events; at minimum
+        the text stream must be non-empty.
+        """
+        print("\n=== Test 51: nova_grounding via converse-stream (streaming) ===")
+
+        tool_config = {
+            "tools": [
+                {"systemTool": {"name": "nova_grounding"}}
+            ]
+        }
+
+        try:
+            response_stream = bedrock_client.converse_stream(
+                modelId=self.NOVA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Use web search to briefly describe what the Eiffel Tower is."
+                                )
+                            }
+                        ],
+                    }
+                ],
+                toolConfig=tool_config,
+                inferenceConfig={"maxTokens": 500},
+            )
+        except AttributeError:
+            pytest.skip("converse_stream not available in this boto3 version")
+        except Exception as e:
+            err_str = str(e).lower()
+            if "validation" in err_str or "unknown" in err_str or "not supported" in err_str:
+                pytest.skip(f"nova_grounding streaming not available: {e}")
+            raise
+
+        stream = response_stream.get("stream")
+        assert stream is not None, "Response missing 'stream'"
+
+        event_types = []
+        text_parts = []
+        start_time = time.time()
+        timeout = 60  # grounding may take longer due to web fetch
+
+        for event in stream:
+            if time.time() - start_time > timeout:
+                pytest.fail(f"Streaming timed out after {timeout}s. Events so far: {event_types}")
+
+            if "contentBlockDelta" in event:
+                delta = event["contentBlockDelta"].get("delta", {})
+                if "text" in delta and delta["text"]:
+                    text_parts.append(delta["text"])
+            elif "messageStop" in event:
+                event_types.append("messageStop")
+            elif "messageStart" in event:
+                event_types.append("messageStart")
+
+        assert "messageStop" in event_types, (
+            f"Expected 'messageStop' event, got: {event_types}"
+        )
+        full_text = "".join(text_parts)
+        assert full_text, f"Expected non-empty streamed text from nova_grounding, got empty"
+        print(f"  ✓ streamed {len(text_parts)} text deltas, text={full_text[:80]!r}")
+
+    # ------------------------------------------------------------------ #
+    # 52. nova_code_interpreter — non-streaming                            #
+    # ------------------------------------------------------------------ #
+    @skip_if_no_api_key("bedrock")
+    def test_52_nova_code_interpreter_non_streaming(self, bedrock_client):
+        """Test Case 52: nova_code_interpreter system tool via Bedrock Converse (non-streaming).
+
+        AWS Bedrock executes the generated code automatically and returns both the
+        toolUse (code) and toolResult (stdout/stderr) in the same assistant message.
+        Bifrost merges these into a code_interpreter_call output item and converts
+        back to Bedrock format, producing a text explanation of the result.
+        """
+        print("\n=== Test 52: nova_code_interpreter via converse (non-streaming) ===")
+
+        tool_config = {
+            "tools": [
+                {"systemTool": {"name": "nova_code_interpreter"}}
+            ]
+        }
+
+        try:
+            response = bedrock_client.converse(
+                modelId=self.NOVA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Write and execute Python code to calculate the factorial of 10 "
+                                    "and print the result."
+                                )
+                            }
+                        ],
+                    }
+                ],
+                toolConfig=tool_config,
+                inferenceConfig={"maxTokens": 500},
+            )
+        except Exception as e:
+            err_str = str(e).lower()
+            if "validation" in err_str or "unknown" in err_str or "not supported" in err_str:
+                pytest.skip(f"nova_code_interpreter not available or schema rejected: {e}")
+            raise
+
+        assert "output" in response, f"Expected 'output' in response, got: {list(response.keys())}"
+        msg = response["output"].get("message", {})
+        assert msg.get("role") == "assistant", f"Expected role='assistant', got: {msg.get('role')}"
+
+        content_blocks = msg.get("content", [])
+        assert isinstance(content_blocks, list) and len(content_blocks) > 0, (
+            f"Expected non-empty content blocks, got: {content_blocks}"
+        )
+
+        # nova_code_interpreter returns: empty text, toolUse (code), toolResult
+        # (stdout), then the model's explanation — possibly split across blocks.
+        # Collect all non-empty text and verify the factorial result appears.
+        has_tool_use = any("toolUse" in b for b in content_blocks)
+        has_tool_result = any("toolResult" in b for b in content_blocks)
+        full_text = " ".join(b["text"] for b in content_blocks if b.get("text", "").strip())
+
+        assert has_tool_use, f"Expected toolUse block, got: {content_blocks}"
+        assert full_text or has_tool_result, (
+            f"Expected execution result (toolResult) or explanatory text, got: {content_blocks}"
+        )
+
+        # The combined text should mention the factorial result or the computation
+        if full_text:
+            assert any(kw in full_text.lower() for kw in ["3628800", "factorial", "result", "10", "code"]), (
+                f"Expected factorial-related text, got: {full_text[:200]}"
+            )
+
+        stop_reason = response.get("stopReason", "")
+        assert stop_reason in ("end_turn", "max_tokens"), (
+            f"Unexpected stopReason: {stop_reason}"
+        )
+        print(f"  ✓ stopReason={stop_reason!r}, content_blocks={len(content_blocks)}")
+        if full_text:
+            print(f"  ✓ text={full_text[:80]!r}")
+
+    # ------------------------------------------------------------------ #
+    # 53. nova_code_interpreter — streaming                                #
+    # ------------------------------------------------------------------ #
+    @skip_if_no_api_key("bedrock")
+    def test_53_nova_code_interpreter_streaming(self, bedrock_client):
+        """Test Case 53: nova_code_interpreter system tool via Bedrock Converse-Stream.
+
+        In streaming mode, Bifrost emits code_interpreter_call events as the code
+        input streams in, then emits code_interpreter_call.completed at the end.
+        The stream must contain at least one contentBlockDelta (text or toolUse input)
+        and must end with a messageStop event.
+        """
+        print("\n=== Test 53: nova_code_interpreter via converse-stream (streaming) ===")
+
+        tool_config = {
+            "tools": [
+                {"systemTool": {"name": "nova_code_interpreter"}}
+            ]
+        }
+
+        try:
+            response_stream = bedrock_client.converse_stream(
+                modelId=self.NOVA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Write and run Python code to compute 2 raised to the power of 20."
+                                )
+                            }
+                        ],
+                    }
+                ],
+                toolConfig=tool_config,
+                inferenceConfig={"maxTokens": 500},
+            )
+        except AttributeError:
+            pytest.skip("converse_stream not available in this boto3 version")
+        except Exception as e:
+            err_str = str(e).lower()
+            if "validation" in err_str or "unknown" in err_str or "not supported" in err_str:
+                pytest.skip(f"nova_code_interpreter streaming not available: {e}")
+            raise
+
+        stream = response_stream.get("stream")
+        assert stream is not None, "Response missing 'stream'"
+
+        event_types = []
+        text_parts = []
+        tool_input_parts = []
+        start_time = time.time()
+        timeout = 60
+
+        for event in stream:
+            if time.time() - start_time > timeout:
+                pytest.fail(f"Streaming timed out after {timeout}s. Events so far: {event_types}")
+
+            if "contentBlockDelta" in event:
+                delta = event["contentBlockDelta"].get("delta", {})
+                if "text" in delta and delta["text"]:
+                    text_parts.append(delta["text"])
+                elif "toolUse" in delta and delta["toolUse"].get("input"):
+                    tool_input_parts.append(delta["toolUse"]["input"])
+            elif "messageStop" in event:
+                event_types.append("messageStop")
+            elif "messageStart" in event:
+                event_types.append("messageStart")
+            elif "contentBlockStart" in event:
+                event_types.append("contentBlockStart")
+
+        assert "messageStop" in event_types, (
+            f"Expected 'messageStop' event, got: {event_types}"
+        )
+
+        # Must have streamed at least text or code input deltas
+        has_text = len(text_parts) > 0
+        has_tool_input = len(tool_input_parts) > 0
+        assert has_text or has_tool_input, (
+            f"Expected text or toolUse input deltas in stream, got neither. "
+            f"event_types={event_types}"
+        )
+
+        full_text = "".join(text_parts)
+        full_tool_input = "".join(tool_input_parts)
+        print(
+            f"  ✓ text_deltas={len(text_parts)}, tool_input_deltas={len(tool_input_parts)}, "
+            f"text={full_text[:60]!r}, tool_input={full_tool_input[:60]!r}"
+        )
