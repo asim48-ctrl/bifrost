@@ -1,0 +1,50 @@
+# Google GenAI (Gemini) - Long-running Video Operation Polling
+
+video-operations:
+  get:
+    operationId: geminiRetrieveVideoOperation
+    summary: Retrieve video generation operation (Gemini format)
+    description: |
+      Polls the status of a long-running video generation operation produced
+      by `models/{model}:generateVideos`. The Gemini SDK appends the
+      operation name (which may include `/`) as a wildcard path segment.
+    tags:
+    - GenAI Integration
+    parameters:
+    - name: model
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Video model identifier (e.g. `veo-3.1-generate-preview`).
+    - name: operation_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Operation name (wildcard; may contain `/`).
+    responses:
+      '200':
+        description: Operation status payload (Gemini video generation response).
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      '404':
+        description: Operation not found
+        content:
+          application/json:
+            schema:
+              $ref: '../../../schemas/integrations/genai/common.yaml#/GeminiError'
+      '500':
+        description: Internal server error
+        content:
+          application/json:
+            schema:
+              $ref: '../../../schemas/integrations/genai/common.yaml#/GeminiError'
+    security:
+    - BearerAuth: []
+    - BasicAuth: []
+    - VirtualKeyAuth: []
+    - ApiKeyAuth: []
